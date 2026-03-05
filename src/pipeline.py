@@ -1,0 +1,513 @@
+"""
+Video Analysis Pipeline
+Main orchestrator that runs all analysis modules and produces final output
+"""
+
+import os
+import json
+import logging
+from pathlib import Path
+from typing import Optional, Dict, Any, List, Callable
+from dataclasses import dataclass, field
+from datetime import datetime
+import time
+
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
+from rich.table import Table
+from rich.panel import Panel
+
+from .config import Config
+from .video_processor import VideoProcessor, VideoMetadata
+from .speech_recognition import SpeechRecognizer, TranscriptionResult
+from .speaker_diarization import SpeakerDiarizer, DiarizationResult
+from .face_recognition_module import FaceProcessor, FrameFaces
+from .scene_detection import SceneDetector, SceneDetectionResult
+from .object_detection import ObjectDetector, FrameDetections
+from .action_recognition import ActionRecognizer, ClipActions
+from .multimodal_fusion import MultimodalFusion, VideoAnalysis
+from .text_generator import TextGenerator
+
+logger = logging.getLogger(__name__)
+console = Console()
+
+
+@dataclass
+class PipelineResult:
+    """Complete pipeline result"""
+    video_path: str
+    analysis: VideoAnalysis
+    generated_narrative: str
+    generated_screenplay: str
+    processing_time: float
+    output_files: Dict[str, str] = field(default_factory=dict)
+    
+    def save_all(self, output_dir: str) -> Dict[str, str]:
+        """Save all outputs to directory"""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save JSON analysis
+        json_path = output_dir / "analysis.json"
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(self.analysis.to_dict(), f, indent=2, ensure_ascii=False)
+        self.output_files['json'] = str(json_path)
+        
+        # Save narrative
+        narrative_path = output_dir / "narrative.txt"
+        with open(narrative_path, 'w', encoding='utf-8') as f:
+            f.write(self.generated_narrative)
+        self.output_files['narrative'] = str(narrative_path)
+        
+        # Save screenplay
+        screenplay_path = output_dir / "screenplay.txt"
+        with open(screenplay_path, 'w', encoding='utf-8') as f:
+            f.write(self.generated_screenplay)
+        self.output_files['screenplay'] = str(screenplay_path)
+        
+        # Save transcript
+        transcript_path = output_dir / "transcript.txt"
+        with open(transcript_path, 'w', encoding='utf-8') as f:
+            f.write(self.analysis.full_transcript)
+        self.output_files['transcript'] = str(transcript_path)
+        
+        # Save SRT subtitles
+        srt_path = output_dir / "subtitles.srt"
+        with open(srt_path, 'w', encoding='utf-8') as f:
+            f.write(self._generate_srt())
+        self.output_files['srt'] = str(srt_path)
+        
+        logger.info(f"Saved all outputs to {output_dir}")
+        return self.output_files
+    
+    def _generate_srt(self) -> str:
+        """Generate SRT subtitle file"""
+        lines = []
+        counter = 1
+        
+        for scene in self.analysis.scenes:
+            for dialogue in scene.dialogues:
+                start = self._format_srt_time(dialogue.start_time)
+                end = self._format_srt_time(dialogue.end_time)
+                
+                lines.append(str(counter))
+                lines.append(f"{start} --> {end}")
+                lines.append(f"[{dialogue.speaker}]: {dialogue.text}")
+                lines.append("")
+                counter += 1
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def _format_srt_time(seconds: float) -> str:
+        """Format time as SRT timestamp"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        millis = int((seconds % 1) * 1000)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+class VideoPipeline:
+    """
+    Main video analysis pipeline
+    Orchestrates all processing modules
+    """
+    
+    def __init__(self, config: Optional[Config] = None):
+        """
+        Initialize the pipeline
+        
+        Args:
+            config: Configuration object (loads default if None)
+        """
+        self.config = config or Config.load()
+        self.config.create_dirs()
+        
+        # Setup logging
+        self._setup_logging()
+        
+        # Initialize modules (lazy loading)
+        self._video_processor = None
+        self._speech_recognizer = None
+        self._speaker_diarizer = None
+        self._face_processor = None
+        self._scene_detector = None
+        self._object_detector = None
+        self._action_recognizer = None
+        self._fusion = None
+        self._text_generator = None
+        
+        logger.info("Video pipeline initialized")
+    
+    def _setup_logging(self) -> None:
+        """Setup logging configuration"""
+        log_level = getattr(logging, self.config.log_level.upper(), logging.INFO)
+        logging.basicConfig(
+            level=log_level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+    
+    # Lazy loading properties
+    @property
+    def video_processor(self) -> VideoProcessor:
+        if self._video_processor is None:
+            self._video_processor = VideoProcessor(self.config)
+        return self._video_processor
+    
+    @property
+    def speech_recognizer(self) -> SpeechRecognizer:
+        if self._speech_recognizer is None:
+            self._speech_recognizer = SpeechRecognizer(self.config)
+        return self._speech_recognizer
+    
+    @property
+    def speaker_diarizer(self) -> SpeakerDiarizer:
+        if self._speaker_diarizer is None:
+            self._speaker_diarizer = SpeakerDiarizer(self.config)
+        return self._speaker_diarizer
+    
+    @property
+    def face_processor(self) -> FaceProcessor:
+        if self._face_processor is None:
+            self._face_processor = FaceProcessor(self.config)
+        return self._face_processor
+    
+    @property
+    def scene_detector(self) -> SceneDetector:
+        if self._scene_detector is None:
+            self._scene_detector = SceneDetector(self.config)
+        return self._scene_detector
+    
+    @property
+    def object_detector(self) -> ObjectDetector:
+        if self._object_detector is None:
+            self._object_detector = ObjectDetector(self.config)
+        return self._object_detector
+    
+    @property
+    def action_recognizer(self) -> ActionRecognizer:
+        if self._action_recognizer is None:
+            self._action_recognizer = ActionRecognizer(self.config)
+        return self._action_recognizer
+    
+    @property
+    def fusion(self) -> MultimodalFusion:
+        if self._fusion is None:
+            self._fusion = MultimodalFusion(self.config)
+        return self._fusion
+    
+    @property
+    def text_generator(self) -> TextGenerator:
+        if self._text_generator is None:
+            self._text_generator = TextGenerator(self.config)
+        return self._text_generator
+    
+    def process(
+        self,
+        video_path: str,
+        output_dir: Optional[str] = None,
+        speaker_names: Optional[Dict[str, str]] = None,
+        skip_faces: bool = False,
+        skip_actions: bool = False,
+        generate_text: bool = True,
+        progress_callback: Optional[Callable[[str, float], None]] = None
+    ) -> PipelineResult:
+        """
+        Process a video file through the complete pipeline
+        
+        Args:
+            video_path: Path to video file
+            output_dir: Output directory (default: outputs/<video_name>)
+            speaker_names: Optional mapping of speaker IDs to names
+            skip_faces: Skip face detection (faster processing)
+            skip_actions: Skip action recognition (faster processing)
+            generate_text: Whether to generate LLM narratives
+            progress_callback: Optional callback for progress updates
+        
+        Returns:
+            PipelineResult with all analysis and generated content
+        """
+        start_time = time.time()
+        video_path = str(Path(video_path).resolve())
+        
+        if output_dir is None:
+            video_name = Path(video_path).stem
+            output_dir = Path(self.config.output_dir) / video_name
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        console.print(Panel.fit(
+            f"[bold blue]Processing Video[/bold blue]\n{video_path}",
+            title="Video Scene Understanding"
+        ))
+        
+        def update_progress(stage: str, progress: float = 0):
+            if progress_callback:
+                progress_callback(stage, progress)
+            console.print(f"[yellow]→[/yellow] {stage}")
+        
+        # Step 1: Video Metadata
+        update_progress("Extracting video metadata...")
+        metadata = self.video_processor.get_metadata(video_path)
+        self._print_metadata(metadata)
+        
+        # Step 2: Extract Audio
+        update_progress("Extracting audio...")
+        audio_path = self.video_processor.extract_audio(
+            video_path,
+            output_path=str(output_dir / "audio.wav")
+        )
+        
+        # Step 3: Speech Recognition
+        update_progress("Transcribing speech...")
+        transcription = self.speech_recognizer.transcribe(audio_path)
+        console.print(f"  [green]✓[/green] Transcribed {transcription.word_count} words")
+        
+        # Step 4: Speaker Diarization
+        update_progress("Identifying speakers...")
+        diarization = None
+        if self.config.diarization.enabled:
+            diarization = self.speaker_diarizer.diarize(audio_path)
+            console.print(f"  [green]✓[/green] Found {diarization.num_speakers} speakers")
+        
+        # Step 5: Scene Detection
+        update_progress("Detecting scenes...")
+        scene_result = self.scene_detector.detect_scenes(video_path)
+        console.print(f"  [green]✓[/green] Detected {scene_result.total_scenes} scenes")
+        
+        # Save scene thumbnails
+        scenes_with_thumbs = self.scene_detector.save_scene_thumbnails(
+            video_path, scene_result.scenes, str(output_dir / "thumbnails")
+        )
+        
+        # Step 6: Extract Frames for Analysis
+        update_progress("Extracting frames...")
+        frames = self.video_processor.extract_frames(
+            video_path,
+            output_dir=str(output_dir / "frames"),
+            return_images=True
+        )
+        console.print(f"  [green]✓[/green] Extracted {len(frames)} frames")
+        
+        # Step 7: Object Detection
+        update_progress("Detecting objects...")
+        object_results, object_tracks = self.object_detector.detect_and_track(video_path)
+        obj_summary = self.object_detector.summarize_detections(object_results)
+        console.print(f"  [green]✓[/green] Found {obj_summary['unique_objects']} object types")
+        
+        # Step 8: Face Detection & Recognition
+        face_results = []
+        if not skip_faces:
+            update_progress("Processing faces...")
+            face_results = self._process_faces(frames)
+            console.print(f"  [green]✓[/green] Processed faces in {len(face_results)} frames")
+        
+        # Step 9: Action Recognition
+        action_results = []
+        if not skip_actions:
+            update_progress("Recognizing actions...")
+            action_results = self.action_recognizer.process_video(video_path)
+            action_summary = self.action_recognizer.summarize_actions(action_results)
+            console.print(f"  [green]✓[/green] Recognized {action_summary['unique_actions']} actions")
+        
+        # Step 10: Analyze Scenes
+        update_progress("Analyzing scenes...")
+        analyzed_scenes = self._analyze_scenes(
+            frames, scenes_with_thumbs, metadata
+        )
+        
+        # Step 11: Multimodal Fusion
+        update_progress("Fusing multimodal data...")
+        video_analysis = self.fusion.fuse(
+            video_metadata={
+                'path': video_path,
+                'duration': metadata.duration,
+                'fps': metadata.fps,
+                'width': metadata.width,
+                'height': metadata.height
+            },
+            scenes=analyzed_scenes,
+            transcription={
+                'text': transcription.text,
+                'segments': [
+                    {'start': s.start, 'end': s.end, 'text': s.text, 'speaker': s.speaker}
+                    for s in transcription.segments
+                ]
+            },
+            diarization={
+                'segments': [
+                    {'start': s.start, 'end': s.end, 'speaker': s.speaker}
+                    for s in diarization.segments
+                ] if diarization else []
+            } if diarization else None,
+            face_results=[
+                {
+                    'timestamp': f.timestamp,
+                    'detections': [{'bbox': (d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2)} 
+                                  for d in f.detections],
+                    'matches': [{'identity': m.identity, 'confidence': m.confidence} 
+                               for m in f.matches]
+                }
+                for f in face_results
+            ],
+            object_results=[
+                {
+                    'timestamp': f.timestamp,
+                    'detections': [{'class_name': d.class_name, 'confidence': d.confidence}
+                                  for d in f.detections]
+                }
+                for f in object_results
+            ],
+            action_results=[
+                {
+                    'start_time': a.start_time,
+                    'end_time': a.end_time,
+                    'predictions': [{'action': p.action, 'confidence': p.confidence}
+                                   for p in a.predictions]
+                }
+                for a in action_results
+            ],
+            speaker_names=speaker_names
+        )
+        
+        # Step 12: Generate Text
+        narrative = ""
+        screenplay = ""
+        if generate_text:
+            update_progress("Generating narrative...")
+            narrative = self.text_generator.generate_full_narrative(video_analysis.to_dict())
+            screenplay = self.text_generator.generate_screenplay_format(video_analysis.to_dict())
+            console.print(f"  [green]✓[/green] Generated narrative text")
+        
+        # Create result
+        processing_time = time.time() - start_time
+        
+        result = PipelineResult(
+            video_path=video_path,
+            analysis=video_analysis,
+            generated_narrative=narrative,
+            generated_screenplay=screenplay,
+            processing_time=processing_time
+        )
+        
+        # Save outputs
+        update_progress("Saving outputs...")
+        result.save_all(str(output_dir))
+        
+        # Print summary
+        self._print_summary(result)
+        
+        return result
+    
+    def _process_faces(self, frames: List) -> List[FrameFaces]:
+        """Process all frames for face detection"""
+        results = []
+        
+        for frame in frames:
+            if frame.image is not None:
+                face_result = self.face_processor.process_frame(
+                    frame=frame.image,
+                    frame_number=frame.frame_number,
+                    timestamp=frame.timestamp
+                )
+                results.append(face_result)
+        
+        return results
+    
+    def _analyze_scenes(
+        self,
+        frames: List,
+        scenes: List,
+        metadata: VideoMetadata
+    ) -> List[Dict[str, Any]]:
+        """Analyze each scene with environment classification"""
+        analyzed = []
+        
+        for scene in scenes:
+            # Get frames for this scene
+            scene_frames = [
+                f.image for f in frames
+                if f.image is not None and
+                scene.start_time <= f.timestamp <= scene.end_time
+            ]
+            
+            # Analyze scene
+            if scene_frames:
+                scene = self.scene_detector.analyze_scene(scene_frames, scene)
+            
+            analyzed.append({
+                'scene_number': scene.scene_number,
+                'start_time': scene.start_time,
+                'end_time': scene.end_time,
+                'duration': scene.duration,
+                'environment': scene.environment,
+                'is_indoor': scene.is_indoor,
+                'brightness': scene.brightness,
+                'thumbnail_path': scene.thumbnail_path
+            })
+        
+        return analyzed
+    
+    def _print_metadata(self, metadata: VideoMetadata) -> None:
+        """Print video metadata"""
+        table = Table(title="Video Information")
+        table.add_column("Property", style="cyan")
+        table.add_column("Value", style="green")
+        
+        table.add_row("Duration", f"{metadata.duration:.2f} seconds")
+        table.add_row("Resolution", f"{metadata.width}x{metadata.height}")
+        table.add_row("FPS", f"{metadata.fps:.2f}")
+        table.add_row("Total Frames", str(metadata.total_frames))
+        table.add_row("Has Audio", "Yes" if metadata.has_audio else "No")
+        
+        console.print(table)
+    
+    def _print_summary(self, result: PipelineResult) -> None:
+        """Print processing summary"""
+        console.print()
+        console.print(Panel.fit(
+            f"[bold green]Processing Complete![/bold green]\n\n"
+            f"Time: {result.processing_time:.2f} seconds\n"
+            f"Scenes: {len(result.analysis.scenes)}\n"
+            f"Speakers: {len(result.analysis.all_speakers)}\n"
+            f"People Recognized: {len(result.analysis.all_people)}\n"
+            f"Objects Detected: {len(result.analysis.all_objects)}\n"
+            f"Actions Recognized: {len(result.analysis.all_actions)}",
+            title="Summary"
+        ))
+        
+        console.print("\n[bold]Output Files:[/bold]")
+        for name, path in result.output_files.items():
+            console.print(f"  [blue]•[/blue] {name}: {path}")
+    
+    def cleanup(self) -> None:
+        """Clean up temporary files"""
+        self.video_processor.cleanup()
+        logger.info("Cleanup complete")
+
+
+def quick_analyze(
+    video_path: str,
+    output_dir: Optional[str] = None,
+    config_path: Optional[str] = None
+) -> PipelineResult:
+    """
+    Quick analysis function for simple usage
+    
+    Args:
+        video_path: Path to video file
+        output_dir: Output directory
+        config_path: Optional config file path
+    
+    Returns:
+        PipelineResult
+    """
+    config = Config.load(config_path)
+    pipeline = VideoPipeline(config)
+    
+    try:
+        result = pipeline.process(video_path, output_dir)
+        return result
+    finally:
+        pipeline.cleanup()
