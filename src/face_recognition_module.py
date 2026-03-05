@@ -104,13 +104,25 @@ class FaceProcessor:
         """Initialize MTCNN detector"""
         try:
             from mtcnn import MTCNN
-            self.detector = MTCNN(
-                min_face_size=self.config.face.min_face_size
-            )
+            # MTCNN API differs between versions; try with min_face_size, else fallback
+            try:
+                self.detector = MTCNN(
+                    min_face_size=self.config.face.min_face_size
+                )
+            except TypeError:
+                # Older/newer MTCNN versions may not accept min_face_size kwarg
+                self.detector = MTCNN()
             self._detector_type = "mtcnn"
             logger.info("MTCNN face detector initialized")
         except ImportError:
             logger.error("MTCNN not installed. Run: pip install mtcnn")
+            self.detector = None
+            self._detector_type = None
+        except Exception as e:
+            logger.warning(f"Failed to initialize MTCNN detector: {e}")
+            # Disable detector to avoid aborting the pipeline
+            self.detector = None
+            self._detector_type = None
     
     def _init_retinaface(self) -> None:
         """Initialize RetinaFace detector"""
@@ -136,14 +148,15 @@ class FaceProcessor:
     
     def _init_recognizer(self) -> None:
         """Initialize face recognizer for embeddings"""
+        # DeepFace can trigger runtime issues (Conv2D errors) on some setups.
+        # Disable DeepFace-based recognition by default to keep pipeline robust.
         try:
-            from deepface import DeepFace
-            self.recognizer = DeepFace
-            self._recognizer_model = self.config.face.recognition_model
-            logger.info(f"DeepFace recognizer initialized with {self._recognizer_model}")
-        except ImportError:
-            logger.warning("DeepFace not installed. Face recognition will be limited.")
-            self.recognizer = None
+            import deepface  # type: ignore
+            logger.warning("DeepFace is available but will be disabled to avoid runtime issues in this environment.")
+        except Exception:
+            logger.info("DeepFace not available; face recognition disabled.")
+
+        self.recognizer = None
     
     def _load_known_faces(self) -> None:
         """Load known faces from directory"""
@@ -199,12 +212,18 @@ class FaceProcessor:
         
         detections = []
         
-        if self._detector_type == "mtcnn":
-            detections = self._detect_mtcnn(rgb_image, return_landmarks)
-        elif self._detector_type == "retinaface":
-            detections = self._detect_retinaface(rgb_image, return_landmarks)
-        elif self._detector_type == "dlib":
-            detections = self._detect_dlib(rgb_image, return_landmarks)
+        try:
+            if self._detector_type == "mtcnn" and self.detector is not None:
+                detections = self._detect_mtcnn(rgb_image, return_landmarks)
+            elif self._detector_type == "retinaface" and self.detector is not None:
+                detections = self._detect_retinaface(rgb_image, return_landmarks)
+            elif self._detector_type == "dlib" and self.detector is not None:
+                detections = self._detect_dlib(rgb_image, return_landmarks)
+            else:
+                detections = []
+        except Exception as e:
+            logger.warning(f"Face detector error: {e}")
+            detections = []
         
         # Filter by confidence
         threshold = self.config.face.confidence_threshold
@@ -344,36 +363,58 @@ class FaceProcessor:
         
         if isinstance(image, str):
             image = cv2.imread(image)
-        
-        # Crop face region
+
+        # Crop face region with safety checks
         bbox = detection.bbox
-        face_img = image[bbox.y1:bbox.y2, bbox.x1:bbox.x2]
-        
-        # Get embedding
-        embedding = self._get_embedding(face_img)
+        h, w = image.shape[:2]
+
+        # Clamp coordinates
+        x1 = max(0, min(w - 1, bbox.x1))
+        y1 = max(0, min(h - 1, bbox.y1))
+        x2 = max(0, min(w, bbox.x2))
+        y2 = max(0, min(h, bbox.y2))
+
+        # Ensure non-empty box
+        if x2 <= x1 or y2 <= y1 or (x2 - x1) < 20 or (y2 - y1) < 20:
+            logger.debug(f"Face bbox too small or invalid: {(x1,y1,x2,y2)}; skipping recognition")
+            return None
+
+        face_img = image[y1:y2, x1:x2]
+
+        # Get embedding (guarded inside _get_embedding)
+        try:
+            embedding = self._get_embedding(face_img)
+        except Exception as e:
+            logger.warning(f"Unexpected error extracting embedding: {e}")
+            return None
+
         if embedding is None:
             return None
-        
+
         detection.embedding = embedding
-        
+
         # Compare with known faces
         best_match = None
         min_distance = float('inf')
-        
-        for name, known_embeddings in self.known_faces.items():
-            for known_emb in known_embeddings:
-                distance = self._compute_distance(embedding, known_emb)
-                
-                if distance < min_distance:
-                    min_distance = distance
-                    best_match = name
-        
+
+        try:
+            for name, known_embeddings in self.known_faces.items():
+                for known_emb in known_embeddings:
+                    distance = self._compute_distance(embedding, known_emb)
+
+                    if distance < min_distance:
+                        min_distance = distance
+                        best_match = name
+        except Exception as e:
+            logger.warning(f"Error comparing embeddings: {e}")
+            return None
+
         # Check threshold
         if min_distance > self.config.face.threshold:
             return None
-        
+
         confidence = 1.0 - min_distance
-        
+
         return FaceMatch(
             detection=detection,
             identity=best_match,
@@ -453,13 +494,23 @@ class FaceProcessor:
         results = []
         
         for frame_data in tqdm(frames, desc="Processing faces"):
-            result = self.process_frame(
-                frame=frame_data['image'],
-                frame_number=frame_data['frame_number'],
-                timestamp=frame_data['timestamp'],
-                recognize=recognize
-            )
-            results.append(result)
+            try:
+                result = self.process_frame(
+                    frame=frame_data['image'],
+                    frame_number=frame_data['frame_number'],
+                    timestamp=frame_data['timestamp'],
+                    recognize=recognize
+                )
+                results.append(result)
+            except Exception as e:
+                logger.warning(f"Face processing error on frame {frame_data.get('frame_number')}: {e}")
+                # Continue without faces for this frame
+                results.append(FrameFaces(
+                    frame_number=frame_data.get('frame_number', -1),
+                    timestamp=frame_data.get('timestamp', 0.0),
+                    detections=[],
+                    matches=[]
+                ))
         
         return results
     

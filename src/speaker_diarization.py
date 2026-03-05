@@ -64,10 +64,21 @@ class SpeakerDiarizer:
                 return
             
             logger.info("Loading Pyannote speaker diarization pipeline...")
-            self.pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                use_auth_token=hf_token
-            )
+            # pyannote.audio API changed; try both old and new token param names
+            try:
+                self.pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    token=hf_token
+                )
+            except TypeError:
+                # older versions expect use_auth_token
+                try:
+                    self.pipeline = Pipeline.from_pretrained(
+                        "pyannote/speaker-diarization-3.1",
+                        use_auth_token=hf_token
+                    )
+                except Exception as e:
+                    raise e
             
             # Move to GPU if available
             if self.device == "cuda" and torch.cuda.is_available():

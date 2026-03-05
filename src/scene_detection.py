@@ -301,26 +301,28 @@ class SceneDetector:
         green_ratio = h_hist[30:90].sum()  # Green hues
         blue_ratio = h_hist[90:130].sum()  # Blue hues
         
-        # Classify
+        # Classify with more descriptive names
         if green_ratio > 0.3:
             if brightness > 150:
-                return ("outdoor_park", 0.7)
+                return ("park or outdoor green space", 0.7)
             else:
-                return ("outdoor_forest", 0.6)
+                return ("forest or wooded area", 0.6)
         elif blue_ratio > 0.3:
             if brightness > 180:
-                return ("outdoor_sky", 0.7)
+                return ("outdoor with sky view", 0.7)
             else:
-                return ("indoor_blue", 0.5)
+                return ("dimly lit room", 0.5)
         elif brightness > 180:
-            return ("indoor_bright", 0.6)
+            return ("well-lit interior", 0.6)
         elif brightness < 80:
-            return ("indoor_dark", 0.6)
+            return ("dimly lit interview setting", 0.7)
+        elif brightness < 120:
+            return ("studio or interview room", 0.65)
         else:
             if avg_saturation < 50:
-                return ("indoor_office", 0.5)
+                return ("office or studio", 0.5)
             else:
-                return ("indoor_residential", 0.5)
+                return ("living space", 0.5)
     
     def analyze_scene(
         self,

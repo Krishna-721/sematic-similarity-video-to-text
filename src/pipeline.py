@@ -108,6 +108,8 @@ class PipelineResult:
         return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
+
+
 class VideoPipeline:
     """
     Main video analysis pipeline
@@ -370,6 +372,17 @@ class VideoPipeline:
             ],
             speaker_names=speaker_names
         )
+
+        # Estimate speaker gender from audio (heuristic pitch-based)
+        update_progress("Analyzing voice characteristics...")
+        try:
+            self._estimate_voice_genders(str(audio_path), video_analysis)
+            self._extract_names_and_label_speakers(video_analysis)
+            # Rebuild transcript with updated speaker labels
+            video_analysis.rebuild_transcript()
+            console.print(f"  [green]✓[/green] Analyzed voice characteristics")
+        except Exception as e:
+            logger.warning(f"Voice analysis failed: {e}")
         
         # Step 12: Generate Text
         narrative = ""
@@ -485,6 +498,103 @@ class VideoPipeline:
         """Clean up temporary files"""
         self.video_processor.cleanup()
         logger.info("Cleanup complete")
+
+    def _estimate_voice_genders(self, audio_path: str, video_analysis) -> None:
+        """Estimate voice gender for each dialogue turn using pitch heuristics.
+
+        This is a simple heuristic: compute median F0 for the dialogue segment and
+        label as 'female' if above threshold, otherwise 'male'. Requires librosa.
+        """
+        try:
+            import librosa
+            import numpy as np
+        except Exception:
+            logger.warning("librosa not available; skipping voice gender estimation")
+            return
+
+        # Threshold (Hz) to separate male/female heuristically
+        F0_THRESHOLD = 165.0  # typical boundary between male and female voice
+
+        # Load full audio
+        try:
+            y, sr = librosa.load(audio_path, sr=None)
+        except Exception as e:
+            logger.warning(f"Failed to load audio for gender estimation: {e}")
+            return
+
+        logger.info("Estimating voice gender for dialogue segments...")
+
+        for scene in video_analysis.scenes:
+            for dlg in scene.dialogues:
+                # Extract center region of dialogue segment
+                start = max(0.0, float(dlg.start_time) - 0.05)
+                end = float(dlg.end_time) + 0.05
+                s_idx = int(start * sr)
+                e_idx = int(end * sr)
+                segment = y[s_idx:e_idx]
+                if segment.size < 512:
+                    # too short to analyze
+                    continue
+
+                try:
+                    # Use librosa.yin to estimate fundamental frequencies
+                    f0 = librosa.yin(segment, fmin=50, fmax=500, sr=sr)
+                    # Clean NaNs and zeros
+                    f0_clean = f0[(~np.isnan(f0)) & (f0 > 0)]
+                    if f0_clean.size == 0:
+                        # fallback to spectral centroid heuristic
+                        try:
+                            centroid = np.median(librosa.feature.spectral_centroid(y=segment, sr=sr))
+                            gender = 'Female' if centroid > 2500 else 'Male'
+                        except Exception:
+                            continue
+                    else:
+                        median_f0 = float(np.median(f0_clean))
+                        gender = 'Female' if median_f0 > F0_THRESHOLD else 'Male'
+
+                    # Create speaker label with gender
+                    dlg.speaker = f"Speaker ({gender})"
+
+                except Exception as e:
+                    logger.debug(f"Gender estimation failed for segment: {e}")
+                    continue
+
+    def _extract_names_and_label_speakers(self, video_analysis) -> None:
+        """Label speakers with numbered identifiers based on gender.
+        
+        Since we can't reliably extract speaker names from dialogue content
+        (names mentioned are often about other things, not speakers), 
+        we use gender-based labels like 'Woman', 'Man', etc.
+        """
+        # Track unique speakers by gender
+        male_count = 0
+        female_count = 0
+        speaker_map = {}  # original label -> new label
+        
+        for scene in video_analysis.scenes:
+            for dlg in scene.dialogues:
+                original = dlg.speaker or 'Speaker'
+                
+                if original in speaker_map:
+                    dlg.speaker = speaker_map[original]
+                    continue
+                
+                # Determine new label based on gender
+                if '(Female)' in original:
+                    female_count += 1
+                    new_label = f"Woman {female_count}" if female_count > 1 else "Woman"
+                    speaker_map[original] = new_label
+                    dlg.speaker = new_label
+                elif '(Male)' in original:
+                    male_count += 1
+                    new_label = f"Man {male_count}" if male_count > 1 else "Man"
+                    speaker_map[original] = new_label
+                    dlg.speaker = new_label
+                else:
+                    # No gender detected
+                    dlg.speaker = 'Speaker'
+        
+        logger.info(f"Labeled {male_count} male and {female_count} female speakers")
 
 
 def quick_analyze(

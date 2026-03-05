@@ -322,7 +322,15 @@ Narrative:"""
         summary = self._summarize_for_prompt(video_analysis)
         
         prompt = self.prompts["full_narrative"].format(video_data=summary)
-        return self.generate(prompt, max_tokens=4000)
+        result = self.generate(prompt, max_tokens=4000)
+
+        # Remove duplicate paragraphs introduced by generation
+        try:
+            result = self._dedupe_paragraphs(result)
+        except Exception:
+            pass
+
+        return result
     
     def _format_scene_for_prompt(self, scene: Dict[str, Any]) -> str:
         """Format scene data for LLM prompt"""
@@ -402,6 +410,49 @@ Narrative:"""
             lines.append(f"\nTranscript excerpt:\n{transcript[:2000]}...")
         
         return "\n".join(lines)
+
+    def _assign_fallback_speakers(self, scene: Dict[str, Any]) -> None:
+        """Ensure dialogue entries have speaker labels; assign fallbacks and remove duplicate lines."""
+        dialogues = scene.get('dialogue', []) or []
+        if not dialogues:
+            return
+
+        # Remove exact duplicate dialogue texts (case-insensitive)
+        seen_texts = set()
+        cleaned = []
+        for i, d in enumerate(dialogues):
+            text = (d.get('text') or '').strip()
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen_texts:
+                continue
+            seen_texts.add(key)
+
+            # Assign fallback speaker if missing
+            if not d.get('speaker'):
+                d['speaker'] = f"Speaker {len(cleaned) + 1}"
+
+            cleaned.append(d)
+
+        scene['dialogue'] = cleaned
+
+    def _dedupe_paragraphs(self, text: str) -> str:
+        """Remove duplicate paragraphs while preserving order."""
+        if not text:
+            return text
+
+        parts = [p.strip() for p in text.split('\n\n') if p.strip()]
+        seen = set()
+        out = []
+        for p in parts:
+            key = ' '.join(p.split()).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(p)
+
+        return '\n\n'.join(out)
     
     def _format_scene_brief(self, scene: Dict[str, Any]) -> str:
         """Format scene as brief summary"""
@@ -438,19 +489,25 @@ Narrative:"""
         from tqdm import tqdm
         
         results = []
-        
+
         for scene in tqdm(scenes, desc="Generating narratives"):
+            # Assign fallback speaker labels and remove duplicate dialogue lines
+            try:
+                self._assign_fallback_speakers(scene)
+            except Exception:
+                logger.debug("Failed to assign fallback speakers for scene %s", scene.get('scene'))
+
             narrative = self.generate_scene_narrative(scene)
-            
+
             summary = ""
             if generate_summary:
                 summary = self.generate_scene_summary(scene)
-            
+
             # Enhance dialogue if present
             dialogue_enhanced = ""
             if scene.get('dialogue'):
                 dialogue_enhanced = self.enhance_dialogue(scene['dialogue'])
-            
+
             result = GeneratedText(
                 scene_number=scene.get('scene', 0),
                 narrative=narrative,
@@ -458,8 +515,22 @@ Narrative:"""
                 dialogue_enhanced=dialogue_enhanced
             )
             results.append(result)
-        
-        return results
+
+        # Deduplicate narrative texts across scenes (preserve first occurrence)
+        unique = []
+        seen = set()
+        for r in results:
+            key = ' '.join((r.narrative or '').split()).lower()
+            if not key:
+                unique.append(r)
+                continue
+            if key in seen:
+                logger.info(f"Removed duplicate narrative for scene {r.scene_number}")
+                continue
+            seen.add(key)
+            unique.append(r)
+
+        return unique
     
     def generate_screenplay_format(
         self,
@@ -475,36 +546,72 @@ Narrative:"""
         lines.append("")
         
         for scene in video_analysis.get('scenes', []):
-            # Scene header
+            # Scene header - improved location formatting
             location_value = scene.get('location') or 'UNKNOWN LOCATION'
-            location = str(location_value).upper()
+            # Make location more readable
+            location = str(location_value).upper().replace('_', ' ')
             indoor = "INT." if scene.get('is_indoor') else "EXT."
-            time_of_day = "DAY" if scene.get('lighting') == 'bright' else "NIGHT"
+            
+            # Determine time of day based on lighting
+            lighting = scene.get('lighting', '')
+            if lighting == 'bright':
+                time_of_day = "DAY"
+            elif lighting in ['dark', 'dim']:
+                time_of_day = "NIGHT"
+            else:
+                time_of_day = "CONTINUOUS"
             
             lines.append(f"{indoor} {location} - {time_of_day}")
             lines.append("")
             
-            # Description
+            # Description - create more cinematic description
             objects = scene.get('objects', [])[:5]
-            if objects:
-                lines.append(f"We see {', '.join(objects)}.")
+            lighting_desc = ""
+            if lighting == 'dark':
+                lighting_desc = "In the dimly lit space, "
+            elif lighting == 'dim':
+                lighting_desc = "Under soft lighting, "
+            elif lighting == 'bright':
+                lighting_desc = "In the well-lit room, "
             
-            # People
+            if objects:
+                # Filter out 'person' for cleaner description
+                obj_list = [o for o in objects if o.lower() != 'person'][:4]
+                if obj_list:
+                    lines.append(f"{lighting_desc}we see {', '.join(obj_list)}.")
+                else:
+                    lines.append(f"{lighting_desc}the scene unfolds.")
+            
+            # People - limit to reasonable count and simplify
             people = scene.get('people', [])
             if people:
-                names = [str(p.get('name') or 'UNKNOWN') for p in people]
-                lines.append(f"{', '.join(names).upper()} {'is' if len(names)==1 else 'are'} present.")
+                # Count unique people, max 5 for display
+                unique_count = min(len(people), 5)
+                if unique_count == 1:
+                    lines.append("A single figure is present.")
+                elif unique_count <= 3:
+                    lines.append(f"{unique_count} people are present in the scene.")
+                else:
+                    lines.append("Several people are present.")
             
-            # Action
-            if scene.get('dominant_action'):
-                lines.append(f"The dominant activity is {scene['dominant_action']}.")
+            # Action - make it more descriptive
+            action = scene.get('dominant_action')
+            if action and action != 'stationary':
+                action_desc = action.replace('_', ' ')
+                lines.append(f"The dominant activity is {action_desc}.")
             
             lines.append("")
             
-            # Dialogue
+            # Dialogue - deduplicate and format nicely
+            seen_dialogue = set()
             for d in scene.get('dialogue', []):
-                speaker = str(d.get('speaker') or 'UNKNOWN').upper()
+                speaker = str(d.get('speaker') or 'SPEAKER').upper()
                 text = str(d.get('text') or '')
+                
+                # Skip duplicates
+                if text in seen_dialogue:
+                    continue
+                seen_dialogue.add(text)
                 
                 lines.append(f"                    {speaker}")
                 lines.append(f"          {text}")

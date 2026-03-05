@@ -144,6 +144,31 @@ class VideoAnalysis:
         """Save to JSON file"""
         with open(path, 'w', encoding='utf-8') as f:
             f.write(self.to_json())
+    
+    def rebuild_transcript(self) -> None:
+        """Rebuild full_transcript from current dialogue data (after speaker labels updated)"""
+        lines = []
+        seen_texts = set()  # avoid duplicates
+        
+        for scene in self.scenes:
+            for dlg in scene.dialogues:
+                # Create timestamp
+                minutes = int(dlg.start_time // 60)
+                seconds = int(dlg.start_time % 60)
+                timestamp = f"[{minutes:02d}:{seconds:02d}]"
+                
+                speaker = dlg.speaker or 'Unknown'
+                text = dlg.text or ''
+                
+                # Skip duplicates
+                key = f"{timestamp}|{text}"
+                if key in seen_texts:
+                    continue
+                seen_texts.add(key)
+                
+                lines.append(f"{timestamp} {speaker}: {text}")
+        
+        self.full_transcript = "\n".join(lines)
 
 
 class MultimodalFusion:
