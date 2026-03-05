@@ -500,10 +500,10 @@ class VideoPipeline:
         logger.info("Cleanup complete")
 
     def _estimate_voice_genders(self, audio_path: str, video_analysis) -> None:
-        """Estimate voice gender for each dialogue turn using pitch heuristics.
+        """Estimate voice gender for dialogue turns using robust pitch heuristics.
 
-        This is a simple heuristic: compute median F0 for the dialogue segment and
-        label as 'female' if above threshold, otherwise 'male'. Requires librosa.
+        Uses voiced-frame checks and conservative thresholds. If confidence is low,
+        speaker stays unlabeled to avoid incorrect gender assignments.
         """
         try:
             import librosa
@@ -512,8 +512,9 @@ class VideoPipeline:
             logger.warning("librosa not available; skipping voice gender estimation")
             return
 
-        # Threshold (Hz) to separate male/female heuristically
-        F0_THRESHOLD = 165.0  # typical boundary between male and female voice
+        # Conservative pitch bands (Hz)
+        MALE_UPPER = 155.0
+        FEMALE_LOWER = 185.0
 
         # Load full audio
         try:
@@ -532,28 +533,43 @@ class VideoPipeline:
                 s_idx = int(start * sr)
                 e_idx = int(end * sr)
                 segment = y[s_idx:e_idx]
-                if segment.size < 512:
+                duration = max(0.0, end - start)
+                if segment.size < 2048 or duration < 0.8:
                     # too short to analyze
                     continue
 
                 try:
-                    # Use librosa.yin to estimate fundamental frequencies
+                    # Use YIN to estimate fundamental frequencies
                     f0 = librosa.yin(segment, fmin=50, fmax=500, sr=sr)
-                    # Clean NaNs and zeros
                     f0_clean = f0[(~np.isnan(f0)) & (f0 > 0)]
-                    if f0_clean.size == 0:
-                        # fallback to spectral centroid heuristic
-                        try:
-                            centroid = np.median(librosa.feature.spectral_centroid(y=segment, sr=sr))
-                            gender = 'Female' if centroid > 2500 else 'Male'
-                        except Exception:
-                            continue
-                    else:
-                        median_f0 = float(np.median(f0_clean))
-                        gender = 'Female' if median_f0 > F0_THRESHOLD else 'Male'
 
-                    # Create speaker label with gender
-                    dlg.speaker = f"Speaker ({gender})"
+                    if f0_clean.size < 10:
+                        continue
+
+                    voiced_ratio = float(f0_clean.size) / float(f0.size if f0.size > 0 else 1)
+                    if voiced_ratio < 0.35:
+                        continue
+
+                    p25 = float(np.percentile(f0_clean, 25))
+                    p50 = float(np.percentile(f0_clean, 50))
+                    p75 = float(np.percentile(f0_clean, 75))
+
+                    gender = None
+                    confidence = 0.0
+
+                    # Male if entire central range stays in lower band
+                    if p50 <= MALE_UPPER and p75 <= 185.0:
+                        gender = 'Male'
+                        confidence = min(0.95, 0.55 + (MALE_UPPER - p50) / 120.0 + voiced_ratio * 0.2)
+
+                    # Female if central range stays in higher band
+                    elif p50 >= FEMALE_LOWER and p25 >= 155.0:
+                        gender = 'Female'
+                        confidence = min(0.95, 0.55 + (p50 - FEMALE_LOWER) / 140.0 + voiced_ratio * 0.2)
+
+                    # Ambiguous range: do not force classification
+                    if gender and confidence >= 0.62:
+                        dlg.speaker = f"Speaker ({gender})"
 
                 except Exception as e:
                     logger.debug(f"Gender estimation failed for segment: {e}")
@@ -591,7 +607,7 @@ class VideoPipeline:
                     speaker_map[original] = new_label
                     dlg.speaker = new_label
                 else:
-                    # No gender detected
+                    # No reliable gender detected
                     dlg.speaker = 'Speaker'
         
         logger.info(f"Labeled {male_count} male and {female_count} female speakers")

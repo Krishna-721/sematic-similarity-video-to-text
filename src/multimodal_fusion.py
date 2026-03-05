@@ -283,6 +283,13 @@ class MultimodalFusion:
         # Get objects in this scene
         objects = self._get_objects_in_range(object_results, start_time, end_time)
         important_objects = self._filter_important_objects(objects)
+
+        # Refine location using object cues to reduce false indoor/outdoor labels
+        refined_location, refined_is_indoor = self._refine_location_with_objects(
+            scene.get('environment'),
+            scene.get('is_indoor'),
+            objects
+        )
         
         # Get actions in this scene
         actions, dominant_action = self._get_actions_in_range(
@@ -300,8 +307,8 @@ class MultimodalFusion:
             start_time=start_time,
             end_time=end_time,
             duration=end_time - start_time,
-            location=scene.get('environment'),
-            is_indoor=scene.get('is_indoor'),
+            location=refined_location,
+            is_indoor=refined_is_indoor,
             lighting=lighting,
             people=people,
             face_count=face_count,
@@ -312,6 +319,43 @@ class MultimodalFusion:
             important_objects=important_objects,
             mood=mood
         )
+
+    def _refine_location_with_objects(
+        self,
+        location: Optional[str],
+        is_indoor: Optional[bool],
+        objects: Dict[str, int]
+    ) -> Tuple[Optional[str], Optional[bool]]:
+        """Refine location label using object evidence."""
+        if not objects:
+            return location, is_indoor
+
+        indoor_objects = {
+            'laptop', 'tv', 'remote', 'keyboard', 'mouse', 'book', 'cell phone',
+            'chair', 'couch', 'bed', 'dining table', 'cup', 'bottle'
+        }
+        outdoor_objects = {
+            'car', 'bus', 'truck', 'motorcycle', 'bicycle', 'traffic light',
+            'stop sign', 'bench', 'fire hydrant'
+        }
+
+        indoor_score = sum(count for obj, count in objects.items() if obj in indoor_objects)
+        outdoor_score = sum(count for obj, count in objects.items() if obj in outdoor_objects)
+
+        current = (location or '').lower()
+
+        # Strong indoor evidence should override weak outdoor visual classification
+        if indoor_score >= max(3, outdoor_score + 2):
+            if 'interview' in current:
+                return 'indoor interview setting', True
+            if 'office' in current or 'studio' in current:
+                return 'indoor office or studio', True
+            return location or 'indoor room', True
+
+        if outdoor_score >= max(3, indoor_score + 2):
+            return location or 'outdoor setting', False
+
+        return location, is_indoor
     
     def _get_dialogues_in_range(
         self,

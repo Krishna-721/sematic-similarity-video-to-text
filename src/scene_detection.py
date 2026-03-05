@@ -296,33 +296,57 @@ class SceneDetector:
         h_hist = h_hist / h_hist.sum()
         s_hist = s_hist / s_hist.sum()
         
-        # Simple rules for classification
+        # Robust feature set
         avg_saturation = np.mean(hsv[:, :, 1])
-        green_ratio = h_hist[30:90].sum()  # Green hues
-        blue_ratio = h_hist[90:130].sum()  # Blue hues
-        
-        # Classify with more descriptive names
-        if green_ratio > 0.3:
-            if brightness > 150:
-                return ("park or outdoor green space", 0.7)
-            else:
-                return ("forest or wooded area", 0.6)
-        elif blue_ratio > 0.3:
-            if brightness > 180:
-                return ("outdoor with sky view", 0.7)
-            else:
-                return ("dimly lit room", 0.5)
-        elif brightness > 180:
-            return ("well-lit interior", 0.6)
-        elif brightness < 80:
-            return ("dimly lit interview setting", 0.7)
-        elif brightness < 120:
-            return ("studio or interview room", 0.65)
-        else:
-            if avg_saturation < 50:
-                return ("office or studio", 0.5)
-            else:
-                return ("living space", 0.5)
+        green_ratio = float(h_hist[30:90].sum())  # Green hues
+        blue_ratio = float(h_hist[90:130].sum())  # Blue hues
+
+        # Sky-like pixels (low saturation blue/white with good brightness)
+        h = hsv[:, :, 0]
+        s = hsv[:, :, 1]
+        v = hsv[:, :, 2]
+        sky_mask = (((h >= 90) & (h <= 130) & (s < 120) & (v > 100)) | ((s < 30) & (v > 180)))
+        sky_ratio = float(np.mean(sky_mask))
+
+        # Skin-like pixels (useful for interview/talking-head scenes)
+        skin_mask = ((h <= 20) & (s >= 40) & (s <= 200) & (v >= 60))
+        skin_ratio = float(np.mean(skin_mask))
+
+        # Texture/structure estimate
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 80, 160)
+        edge_density = float(np.mean(edges > 0))
+
+        # Interview/talking-head override (common for this project's videos)
+        if skin_ratio > 0.05 and edge_density > 0.03 and brightness < 170:
+            return ("indoor interview setting", 0.80)
+
+        # Outdoor score (sky + vegetation + high saturation cue)
+        outdoor_score = sky_ratio + (0.8 * green_ratio) + (0.2 if avg_saturation > 90 else 0.0)
+
+        if outdoor_score > 0.30:
+            if green_ratio > 0.22:
+                return ("outdoor green area", 0.74)
+            if sky_ratio > 0.20:
+                return ("open outdoor space", 0.72)
+            return ("urban outdoor setting", 0.66)
+
+        # Indoor classes
+        if brightness < 70:
+            if skin_ratio > 0.03:
+                return ("indoor low-light interview setting", 0.76)
+            return ("indoor low-light room", 0.70)
+
+        if skin_ratio > 0.04 and brightness < 160:
+            return ("indoor interview setting", 0.75)
+
+        if edge_density > 0.08 and avg_saturation < 75:
+            return ("indoor office or studio", 0.68)
+
+        if brightness > 175:
+            return ("indoor well-lit room", 0.62)
+
+        return ("indoor room", 0.58)
     
     def analyze_scene(
         self,
@@ -351,8 +375,8 @@ class SceneDetector:
         scene.environment = env
         scene.environment_confidence = conf
         
-        # Determine indoor/outdoor
-        scene.is_indoor = "indoor" in env.lower()
+        # Determine indoor/outdoor with image-aware fallback
+        scene.is_indoor = self._estimate_indoor_outdoor(mid_frame, env)
         
         # Calculate average brightness
         brightness_values = []
@@ -365,6 +389,29 @@ class SceneDetector:
         scene.dominant_colors = self._get_dominant_colors(mid_frame)
         
         return scene
+
+    def _estimate_indoor_outdoor(self, frame: np.ndarray, environment: Optional[str]) -> bool:
+        """Estimate indoor/outdoor with keyword + pixel heuristics."""
+        env = (environment or "").lower()
+
+        indoor_terms = {"indoor", "office", "studio", "room", "interview", "kitchen", "bedroom"}
+        outdoor_terms = {"outdoor", "park", "forest", "street", "beach", "mountain", "urban"}
+
+        if any(term in env for term in indoor_terms):
+            return True
+        if any(term in env for term in outdoor_terms):
+            return False
+
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        h = hsv[:, :, 0]
+        s = hsv[:, :, 1]
+        v = hsv[:, :, 2]
+
+        sky_mask = (((h >= 90) & (h <= 130) & (s < 120) & (v > 100)) | ((s < 30) & (v > 180)))
+        green_mask = ((h >= 30) & (h <= 90) & (s > 40))
+
+        outdoor_signal = float(np.mean(sky_mask)) + (0.8 * float(np.mean(green_mask)))
+        return outdoor_signal < 0.28
     
     def _get_dominant_colors(
         self,
