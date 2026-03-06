@@ -31,6 +31,9 @@ transformers
 accelerate
 sentencepiece
 
+# Groq LLM API
+groq
+
 # Web Interface
 gradio
 
