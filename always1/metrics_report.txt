@@ -1,0 +1,82 @@
+============================================================
+VIDEO ANALYSIS ACCURACY METRICS REPORT
+============================================================
+
+Video: /home/hitesh/Desktop/Team-Ashwatthama/video/always.mp4
+Processed: 2026-03-06T13:23:08.740409
+Processing Time: 72.23 seconds
+
+----------------------------------------
+OVERALL SCORES
+----------------------------------------
+  Confidence Score: 78.8%
+  Data Quality Score: 100.0%
+
+----------------------------------------
+AUDIO ANALYSIS
+----------------------------------------
+  Duration: 22.13s
+  Has Speech: Yes
+  Speech Coverage: 93.0%
+  Words Transcribed: 47
+  Segments: 3
+  Transcription Confidence: 70.0%
+  Noise Level: unknown
+
+----------------------------------------
+VIDEO ANALYSIS
+----------------------------------------
+  Duration: 22.13s
+  Resolution: 360x640
+  FPS: 30.00
+  Total Frames: 664
+  Frames Analyzed: 23
+  Quality Score: 40.0%
+  Motion Level: unknown
+
+----------------------------------------
+SCENE DETECTION
+----------------------------------------
+  Scenes Detected: 2
+  Avg Scene Duration: 11.07s
+  Indoor Scenes: 2
+  Outdoor Scenes: 0
+  Environments: N/A
+  Detection Quality: 80.0%
+
+----------------------------------------
+OBJECT DETECTION
+----------------------------------------
+  Unique Objects: 1
+  Total Detections: 660
+  Avg Confidence: 78.8%
+  High-Confidence: 614
+  Frame Coverage: 2869.6%
+  Object Types: person
+
+----------------------------------------
+FACE DETECTION
+----------------------------------------
+  Unique Faces: 1
+  Total Detections: 23
+  Avg Confidence: 100.0%
+  Frame Coverage: 100.0%
+
+----------------------------------------
+ACTION RECOGNITION
+----------------------------------------
+  Unique Actions: 1
+  Total Detections: 40
+  Avg Confidence: 80.0%
+  Actions: stationary
+
+----------------------------------------
+SPEAKER ANALYSIS
+----------------------------------------
+  Speakers Detected: 2
+  Dialogue Turns: 4
+  Avg Turn Duration: 7.93s
+  Gender Breakdown: {'Female': 2, 'Unknown': 2}
+  Diarization Confidence: 70.0%
+
+============================================================

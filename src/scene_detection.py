@@ -175,8 +175,21 @@ class SceneDetector:
             )
             scenes.append(scene)
         
+        # If no scenes detected, create one scene for the entire video
+        if not scenes:
+            logger.info("No scene changes detected, creating single scene for entire video")
+            total_frames = int(video.frame_rate * duration) if video.frame_rate > 0 else 1
+            scenes.append(Scene(
+                scene_number=1,
+                start_frame=0,
+                end_frame=total_frames,
+                start_time=0.0,
+                end_time=duration,
+                duration=duration
+            ))
+        
         # Calculate average duration
-        avg_duration = sum(s.duration for s in scenes) / len(scenes) if scenes else 0
+        avg_duration = sum(s.duration for s in scenes) / len(scenes) if scenes else duration
         
         logger.info(f"Detected {len(scenes)} scenes")
         

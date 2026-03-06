@@ -27,6 +27,9 @@ from .object_detection import ObjectDetector, FrameDetections
 from .action_recognition import ActionRecognizer, ClipActions
 from .multimodal_fusion import MultimodalFusion, VideoAnalysis
 from .text_generator import TextGenerator
+from .accuracy_metrics import MetricsCollector, PipelineMetrics
+from .summary_generator import DetailedSummaryGenerator
+from .groq_summary import GroqSummaryGenerator
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -41,6 +44,8 @@ class PipelineResult:
     generated_screenplay: str
     processing_time: float
     output_files: Dict[str, str] = field(default_factory=dict)
+    metrics: Optional[PipelineMetrics] = None
+    detailed_summary: str = ""
     
     def save_all(self, output_dir: str) -> Dict[str, str]:
         """Save all outputs to directory"""
@@ -76,6 +81,25 @@ class PipelineResult:
         with open(srt_path, 'w', encoding='utf-8') as f:
             f.write(self._generate_srt())
         self.output_files['srt'] = str(srt_path)
+        
+        # Save metrics if available
+        if self.metrics is not None:
+            metrics_json_path = output_dir / "metrics.json"
+            with open(metrics_json_path, 'w', encoding='utf-8') as f:
+                json.dump(self.metrics.to_dict(), f, indent=2, ensure_ascii=False)
+            self.output_files['metrics_json'] = str(metrics_json_path)
+            
+            metrics_report_path = output_dir / "metrics_report.txt"
+            with open(metrics_report_path, 'w', encoding='utf-8') as f:
+                f.write(self.metrics.generate_report())
+            self.output_files['metrics_report'] = str(metrics_report_path)
+        
+        # Save detailed summary if available
+        if self.detailed_summary:
+            summary_path = output_dir / "detailed_summary.txt"
+            with open(summary_path, 'w', encoding='utf-8') as f:
+                f.write(self.detailed_summary)
+            self.output_files['detailed_summary'] = str(summary_path)
         
         logger.info(f"Saved all outputs to {output_dir}")
         return self.output_files
@@ -213,6 +237,8 @@ class VideoPipeline:
         skip_faces: bool = False,
         skip_actions: bool = False,
         generate_text: bool = True,
+        use_groq: bool = True,
+        groq_api_key: Optional[str] = None,
         progress_callback: Optional[Callable[[str, float], None]] = None
     ) -> PipelineResult:
         """
@@ -225,6 +251,8 @@ class VideoPipeline:
             skip_faces: Skip face detection (faster processing)
             skip_actions: Skip action recognition (faster processing)
             generate_text: Whether to generate LLM narratives
+            use_groq: Use Groq LLM (llama-3.3-70b-versatile) for detailed summary
+            groq_api_key: Groq API key (or set GROQ_API_KEY env var)
             progress_callback: Optional callback for progress updates
         
         Returns:
@@ -238,6 +266,10 @@ class VideoPipeline:
             output_dir = Path(self.config.output_dir) / video_name
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize metrics collector
+        metrics_collector = MetricsCollector()
+        metrics_collector.set_video_path(video_path)
         
         console.print(Panel.fit(
             f"[bold blue]Processing Video[/bold blue]\n{video_path}",
@@ -253,6 +285,7 @@ class VideoPipeline:
         update_progress("Extracting video metadata...")
         metadata = self.video_processor.get_metadata(video_path)
         self._print_metadata(metadata)
+        metrics_collector.update_video_metrics(metadata, 0)
         
         # Step 2: Extract Audio
         update_progress("Extracting audio...")
@@ -265,6 +298,7 @@ class VideoPipeline:
         update_progress("Transcribing speech...")
         transcription = self.speech_recognizer.transcribe(audio_path)
         console.print(f"  [green]✓[/green] Transcribed {transcription.word_count} words")
+        metrics_collector.update_audio_metrics(transcription, metadata.duration)
         
         # Step 4: Speaker Diarization
         update_progress("Identifying speakers...")
@@ -291,12 +325,14 @@ class VideoPipeline:
             return_images=True
         )
         console.print(f"  [green]✓[/green] Extracted {len(frames)} frames")
+        metrics_collector.update_video_metrics(metadata, len(frames))
         
         # Step 7: Object Detection
         update_progress("Detecting objects...")
         object_results, object_tracks = self.object_detector.detect_and_track(video_path)
         obj_summary = self.object_detector.summarize_detections(object_results)
         console.print(f"  [green]✓[/green] Found {obj_summary['unique_objects']} object types")
+        metrics_collector.update_object_metrics(object_results, len(frames))
         
         # Step 8: Face Detection & Recognition
         face_results = []
@@ -304,6 +340,7 @@ class VideoPipeline:
             update_progress("Processing faces...")
             face_results = self._process_faces(frames)
             console.print(f"  [green]✓[/green] Processed faces in {len(face_results)} frames")
+            metrics_collector.update_face_metrics(face_results, len(frames))
         
         # Step 9: Action Recognition
         action_results = []
@@ -312,6 +349,7 @@ class VideoPipeline:
             action_results = self.action_recognizer.process_video(video_path)
             action_summary = self.action_recognizer.summarize_actions(action_results)
             console.print(f"  [green]✓[/green] Recognized {action_summary['unique_actions']} actions")
+            metrics_collector.update_action_metrics(action_results)
         
         # Step 10: Analyze Scenes
         update_progress("Analyzing scenes...")
@@ -387,21 +425,63 @@ class VideoPipeline:
         # Step 12: Generate Text
         narrative = ""
         screenplay = ""
+        groq_generator = None
         if generate_text:
-            update_progress("Generating narrative...")
-            narrative = self.text_generator.generate_full_narrative(video_analysis.to_dict())
+            update_progress("Generating screenplay...")
             screenplay = self.text_generator.generate_screenplay_format(video_analysis.to_dict())
-            console.print(f"  [green]✓[/green] Generated narrative text")
+
+            # Use Groq to generate narrative from screenplay when enabled
+            if use_groq:
+                update_progress("Generating narrative from screenplay with Groq (llama-3.3-70b)...")
+                groq_generator = GroqSummaryGenerator(api_key=groq_api_key)
+                narrative = groq_generator.generate_narrative(screenplay, video_analysis.to_dict())
+                console.print(f"  [green]✓[/green] Generated Groq narrative from screenplay")
+            else:
+                update_progress("Generating narrative...")
+                narrative = self.text_generator.generate_full_narrative(video_analysis.to_dict())
+                console.print(f"  [green]✓[/green] Generated narrative text")
+        
+        # Step 13: Update final metrics
+        update_progress("Calculating accuracy metrics...")
+        metrics_collector.update_scene_metrics(video_analysis.scenes, metadata.duration)
+        metrics_collector.update_speaker_metrics(video_analysis)
+        
+        # Step 14: Generate detailed summary
+        update_progress("Generating detailed summary...")
+
+        # Use Groq LLM for detailed summary from generated screenplay if enabled
+        if use_groq:
+            update_progress("Generating AI-powered summary from screenplay with Groq (llama-3.3-70b)...")
+            if groq_generator is None:
+                groq_generator = GroqSummaryGenerator(api_key=groq_api_key)
+
+            detailed_summary = groq_generator.generate_detailed_summary(
+                video_analysis.to_dict(),
+                screenplay,
+                video_analysis.full_transcript
+            )
+            console.print(f"  [green]✓[/green] Generated Groq AI summary from screenplay")
+        else:
+            summary_generator = DetailedSummaryGenerator()
+            detailed_summary = summary_generator.generate_summary(
+                video_analysis.to_dict(),
+                screenplay,
+                metrics_collector.get_metrics().to_dict()
+            )
+            console.print(f"  [green]✓[/green] Generated detailed summary")
         
         # Create result
         processing_time = time.time() - start_time
+        metrics_collector.set_processing_time(processing_time)
         
         result = PipelineResult(
             video_path=video_path,
             analysis=video_analysis,
             generated_narrative=narrative,
             generated_screenplay=screenplay,
-            processing_time=processing_time
+            processing_time=processing_time,
+            metrics=metrics_collector.get_metrics(),
+            detailed_summary=detailed_summary
         )
         
         # Save outputs
@@ -479,16 +559,26 @@ class VideoPipeline:
     def _print_summary(self, result: PipelineResult) -> None:
         """Print processing summary"""
         console.print()
-        console.print(Panel.fit(
-            f"[bold green]Processing Complete![/bold green]\n\n"
-            f"Time: {result.processing_time:.2f} seconds\n"
-            f"Scenes: {len(result.analysis.scenes)}\n"
-            f"Speakers: {len(result.analysis.all_speakers)}\n"
-            f"People Recognized: {len(result.analysis.all_people)}\n"
-            f"Objects Detected: {len(result.analysis.all_objects)}\n"
-            f"Actions Recognized: {len(result.analysis.all_actions)}",
-            title="Summary"
-        ))
+        
+        summary_lines = [
+            f"[bold green]Processing Complete![/bold green]\n",
+            f"Time: {result.processing_time:.2f} seconds",
+            f"Scenes: {len(result.analysis.scenes)}",
+            f"Speakers: {len(result.analysis.all_speakers)}",
+            f"People Recognized: {len(result.analysis.all_people)}",
+            f"Objects Detected: {len(result.analysis.all_objects)}",
+            f"Actions Recognized: {len(result.analysis.all_actions)}"
+        ]
+        
+        if result.metrics:
+            confidence = result.metrics.overall_confidence * 100
+            quality = result.metrics.data_quality_score
+            summary_lines.append("")
+            summary_lines.append(f"[cyan]Quality Metrics:[/cyan]")
+            summary_lines.append(f"  Confidence: {confidence:.1f}%")
+            summary_lines.append(f"  Data Quality: {quality:.1f}%")
+        
+        console.print(Panel.fit("\n".join(summary_lines), title="Summary"))
         
         console.print("\n[bold]Output Files:[/bold]")
         for name, path in result.output_files.items():

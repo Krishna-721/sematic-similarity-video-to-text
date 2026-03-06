@@ -1,0 +1,82 @@
+============================================================
+VIDEO ANALYSIS ACCURACY METRICS REPORT
+============================================================
+
+Video: /home/hitesh/Desktop/Team-Ashwatthama/video/got.mp4
+Processed: 2026-03-06T13:29:29.363582
+Processing Time: 394.50 seconds
+
+----------------------------------------
+OVERALL SCORES
+----------------------------------------
+  Confidence Score: 72.9%
+  Data Quality Score: 95.1%
+
+----------------------------------------
+AUDIO ANALYSIS
+----------------------------------------
+  Duration: 208.08s
+  Has Speech: Yes
+  Speech Coverage: 42.7%
+  Words Transcribed: 247
+  Segments: 41
+  Transcription Confidence: 70.0%
+  Noise Level: unknown
+
+----------------------------------------
+VIDEO ANALYSIS
+----------------------------------------
+  Duration: 208.08s
+  Resolution: 640x360
+  FPS: 23.98
+  Total Frames: 4989
+  Frames Analyzed: 217
+  Quality Score: 40.0%
+  Motion Level: unknown
+
+----------------------------------------
+SCENE DETECTION
+----------------------------------------
+  Scenes Detected: 126
+  Avg Scene Duration: 1.65s
+  Indoor Scenes: 90
+  Outdoor Scenes: 31
+  Environments: N/A
+  Detection Quality: 60.0%
+
+----------------------------------------
+OBJECT DETECTION
+----------------------------------------
+  Unique Objects: 21
+  Total Detections: 3097
+  Avg Confidence: 73.3%
+  High-Confidence: 1779
+  Frame Coverage: 985.7%
+  Object Types: person, horse, airplane, donut, tie
+
+----------------------------------------
+FACE DETECTION
+----------------------------------------
+  Unique Faces: 1
+  Total Detections: 76
+  Avg Confidence: 98.6%
+  Frame Coverage: 31.8%
+
+----------------------------------------
+ACTION RECOGNITION
+----------------------------------------
+  Unique Actions: 5
+  Total Detections: 457
+  Avg Confidence: 67.1%
+  Actions: stationary, slow_movement, talking, walking, gesturing
+
+----------------------------------------
+SPEAKER ANALYSIS
+----------------------------------------
+  Speakers Detected: 2
+  Dialogue Turns: 97
+  Avg Turn Duration: 2.33s
+  Gender Breakdown: {'Male': 74, 'Unknown': 23}
+  Diarization Confidence: 70.0%
+
+============================================================

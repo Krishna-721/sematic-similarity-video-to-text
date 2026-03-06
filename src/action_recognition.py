@@ -15,7 +15,7 @@ import cv2
 logger = logging.getLogger(__name__)
 
 
-# Common action labels (Kinetics-400 subset)
+# Common action labels (Kinetics-400 subset
 ACTION_LABELS = [
     "applauding", "arm wrestling", "arguing", "attending conference", "baby kissing",
     "blowing kisses", "boxing", "brushing teeth", "carrying baby", "celebrating",
