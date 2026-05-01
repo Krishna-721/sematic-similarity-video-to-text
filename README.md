@@ -3,10 +3,10 @@
 **Multimodal Video Understanding System** - Complete pipeline for extracting structured information from videos and generating cinematic text descriptions.
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
+[![Created by](https://img.shields.io/badge/created%20by-Krishna--721-blue.svg)](https://github.com/Krishna-721)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
-![CUDA](https://img.shields.io/badge/CUDA-Optional-orange.svg)
 
-> **Team Ashwatthama** | CRRAO Internal Hackathon 2026
+> **Created by Krishna-721** | Team Ashwatthama | CRRAO Internal Hackathon 2026
 
 ## Overview
 
